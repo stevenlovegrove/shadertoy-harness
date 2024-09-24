@@ -1,3 +1,4 @@
+use chrono::prelude::*;
 use clap::{Arg, ArgAction, Command};
 use notify::{EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use shaderc::{Compiler, ShaderKind};
@@ -20,22 +21,34 @@ use winit::{
 #[allow(non_snake_case)]
 struct Uniforms {
     iResolution: [f32; 3],
+    _padding1: f32, // Padding to align to 16 bytes
     iTime: f32,
+    iTimeDelta: f32,
+    iFrame: i32,
+    iFrameRate: f32,
+    iChannelTime: [f32; 4],
     iMouse: [f32; 4],
+    iDate: [i32; 4],
 }
 
 impl Uniforms {
     fn new(width: f32, height: f32) -> Self {
         Self {
             iResolution: [width, height, 1.0],
+            _padding1: 0.0,
             iTime: 0.0,
+            iTimeDelta: 0.0,
+            iFrame: 0,
+            iFrameRate: 0.0,
+            iChannelTime: [0.0; 4],
             iMouse: [0.0; 4],
+            iDate: [0; 4],
         }
     }
 }
 
 struct State {
-    instance: wgpu::Instance,
+    _instance: wgpu::Instance,
     surface: Option<wgpu::Surface>,
     device: wgpu::Device,
     queue: wgpu::Queue,
@@ -46,7 +59,9 @@ struct State {
     pipeline_layout: wgpu::PipelineLayout,
     vertex_shader_module: wgpu::ShaderModule,
     start_time: Instant,
-    time: f32,
+    previous_time: f32,
+    frame_count: u32,
+    _time: f32,
     mouse_pos: [f32; 2],
     mouse_pressed: bool,
 
@@ -211,7 +226,7 @@ impl State {
         };
 
         Self {
-            instance,
+            _instance: instance,
             surface,
             device,
             queue,
@@ -221,7 +236,7 @@ impl State {
             pipeline_layout,
             vertex_shader_module,
             start_time: Instant::now(),
-            time: 0.0,
+            _time: 0.0,
             mouse_pos: [0.0; 2],
             mouse_pressed: false,
             shader_module: fragment_shader_module,
@@ -232,6 +247,8 @@ impl State {
             uniforms,
             output_file,
             render_texture,
+            previous_time: 0.0,
+            frame_count: 0,
         }
     }
 
@@ -251,10 +268,16 @@ impl State {
     fn inject_shader_preamble(source: &str) -> String {
         let preamble = r#"#version 450
 
-    layout(set = 0, binding = 0) uniform Uniforms {
+    layout(std140, set = 0, binding = 0) uniform Uniforms {
         vec3 iResolution;
+        float _padding1;
         float iTime;
+        float iTimeDelta;
+        int iFrame;
+        float iFrameRate;
+        vec4 iChannelTime;
         vec4 iMouse;
+        ivec4 iDate;
     };
 
     layout(location = 0) out vec4 FragColor;
@@ -265,6 +288,7 @@ impl State {
 
     void main() {
         vec2 fragCoord = gl_FragCoord.xy;
+        fragCoord.y = iResolution.y - fragCoord.y; // Flip the Y-coordinate
         mainImage(FragColor, fragCoord);
     }
 
@@ -370,8 +394,20 @@ impl State {
     }
 
     fn update(&mut self) {
-        self.time = self.start_time.elapsed().as_secs_f32();
-        self.uniforms.iTime = self.time;
+        let current_time = self.start_time.elapsed().as_secs_f32();
+        self.uniforms.iTimeDelta = current_time - self.previous_time;
+        if self.uniforms.iTimeDelta <= 0.0 {
+            self.uniforms.iTimeDelta = 1.0 / 60.0; // Default to 60 FPS if delta is zero or negative
+        }
+        self.previous_time = current_time;
+
+        self.uniforms.iTime = current_time;
+        self.uniforms.iFrame = self.frame_count as i32;
+        self.frame_count += 1;
+
+        self.uniforms.iFrameRate = 1.0 / self.uniforms.iTimeDelta;
+
+        // Update iMouse
         self.uniforms.iMouse = [
             self.mouse_pos[0],
             self.mouse_pos[1],
@@ -386,6 +422,14 @@ impl State {
                 0.0
             },
         ];
+
+        // Update iDate
+        let now = chrono::Local::now();
+        let year = now.year();
+        let month = now.month() as i32;
+        let day = now.day() as i32;
+        let seconds = now.hour() * 3600 + now.minute() * 60 + now.second();
+        self.uniforms.iDate = [year, month, day, seconds as i32];
 
         self.queue.write_buffer(
             &self.uniform_buffer,
@@ -451,8 +495,7 @@ impl State {
 
         let bytes_per_pixel = 4; // RGBA8 format
         let unpadded_bytes_per_row = bytes_per_pixel * self.size.width;
-        let padded_bytes_per_row =
-            ((unpadded_bytes_per_row + 255) / 256) * 256; // Align to 256 bytes
+        let padded_bytes_per_row = ((unpadded_bytes_per_row + 255) / 256) * 256; // Align to 256 bytes
 
         let buffer_size = padded_bytes_per_row as u64 * self.size.height as u64;
 
@@ -507,18 +550,10 @@ impl State {
             pixels.extend_from_slice(&chunk[..unpadded_bytes_per_row as usize]);
         }
 
-        // Flip the image vertically
-        let mut flipped_pixels = Vec::with_capacity(pixels.len());
-        let row_size = (self.size.width * bytes_per_pixel) as usize;
-
-        for row in pixels.chunks_exact(row_size).rev() {
-            flipped_pixels.extend_from_slice(row);
-        }
-
         let image_buffer = image::ImageBuffer::<image::Rgba<u8>, _>::from_raw(
             self.size.width,
             self.size.height,
-            flipped_pixels,
+            pixels,
         )
         .expect("Failed to create image buffer");
 
@@ -535,30 +570,30 @@ impl State {
         {
             self.shader_module = fragment_shader_module;
 
-            self.render_pipeline = self.device.create_render_pipeline(
-                &wgpu::RenderPipelineDescriptor {
-                    label: Some("Render Pipeline"),
-                    layout: Some(&self.pipeline_layout),
-                    vertex: wgpu::VertexState {
-                        module: &self.vertex_shader_module,
-                        entry_point: "main",
-                        buffers: &[],
-                    },
-                    fragment: Some(wgpu::FragmentState {
-                        module: &self.shader_module,
-                        entry_point: "main",
-                        targets: &[Some(wgpu::ColorTargetState {
-                            format: self.config.as_ref().unwrap().format,
-                            blend: Some(wgpu::BlendState::REPLACE),
-                            write_mask: wgpu::ColorWrites::ALL,
-                        })],
-                    }),
-                    primitive: wgpu::PrimitiveState::default(),
-                    depth_stencil: None,
-                    multisample: wgpu::MultisampleState::default(),
-                    multiview: None,
-                },
-            );
+            self.render_pipeline =
+                self.device
+                    .create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                        label: Some("Render Pipeline"),
+                        layout: Some(&self.pipeline_layout),
+                        vertex: wgpu::VertexState {
+                            module: &self.vertex_shader_module,
+                            entry_point: "main",
+                            buffers: &[],
+                        },
+                        fragment: Some(wgpu::FragmentState {
+                            module: &self.shader_module,
+                            entry_point: "main",
+                            targets: &[Some(wgpu::ColorTargetState {
+                                format: self.config.as_ref().unwrap().format,
+                                blend: Some(wgpu::BlendState::REPLACE),
+                                write_mask: wgpu::ColorWrites::ALL,
+                            })],
+                        }),
+                        primitive: wgpu::PrimitiveState::default(),
+                        depth_stencil: None,
+                        multisample: wgpu::MultisampleState::default(),
+                        multiview: None,
+                    });
             true // Indicate success
         } else {
             // Compilation failed; keep using the existing pipeline
