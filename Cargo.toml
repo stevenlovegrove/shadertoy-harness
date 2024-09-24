@@ -1,0 +1,15 @@
+[package]
+name = "shadertoy_harness"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+winit = "0.28"
+wgpu = { version = "0.15", features = ["spirv"] }
+notify = "5.1.0"
+clap = { version = "4.1", features = ["derive"] }
+shaderc = "0.7"
+bytemuck = { version = "1.12", features = ["derive"] }
+image = "0.24"
+pollster = "0.3"
+futures = "0.3"
