@@ -310,12 +310,6 @@ impl State {
         let shader_source = Self::apply_defines(&shader_source, defines);
         let shader_source = Self::inject_shader_preamble(&shader_source);
 
-        // For debugging: Print the transformed shader
-        println!("Transformed shader:");
-        for (i, line) in shader_source.lines().enumerate() {
-            println!("{:4}: {}", i + 1, line);
-        }
-
         let mut compile_options = shaderc::CompileOptions::new().unwrap();
         compile_options.set_target_env(
             shaderc::TargetEnv::Vulkan,
@@ -455,9 +449,16 @@ impl State {
         self.update();
         self.render().unwrap();
 
+        let bytes_per_pixel = 4; // RGBA8 format
+        let unpadded_bytes_per_row = bytes_per_pixel * self.size.width;
+        let padded_bytes_per_row =
+            ((unpadded_bytes_per_row + 255) / 256) * 256; // Align to 256 bytes
+
+        let buffer_size = padded_bytes_per_row as u64 * self.size.height as u64;
+
         let buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Read Buffer"),
-            size: (self.size.width * self.size.height * 4) as u64,
+            size: buffer_size,
             usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
@@ -479,8 +480,8 @@ impl State {
                 buffer: &buffer,
                 layout: wgpu::ImageDataLayout {
                     offset: 0,
-                    bytes_per_row: Some(NonZeroU32::new(4 * self.size.width).unwrap()),
-                    rows_per_image: Some(NonZeroU32::new(self.size.height).unwrap()),
+                    bytes_per_row: Some(NonZeroU32::new(padded_bytes_per_row).unwrap()),
+                    rows_per_image: None,
                 },
             },
             wgpu::Extent3d {
@@ -498,21 +499,26 @@ impl State {
         self.device.poll(wgpu::Maintain::Wait);
         futures::executor::block_on(receiver).unwrap().unwrap();
 
-        let data = buffer_slice.get_mapped_range();
-        let buffer = data.to_vec();
+        let padded_data = buffer_slice.get_mapped_range();
+        let mut pixels = Vec::with_capacity((unpadded_bytes_per_row * self.size.height) as usize);
+
+        // Extract the actual image data, excluding padding
+        for chunk in padded_data.chunks(padded_bytes_per_row as usize) {
+            pixels.extend_from_slice(&chunk[..unpadded_bytes_per_row as usize]);
+        }
 
         // Flip the image vertically
-        let mut flipped_buffer = Vec::with_capacity(buffer.len());
-        for y in (0..self.size.height).rev() {
-            let start = (y * self.size.width * 4) as usize;
-            let end = start + (self.size.width * 4) as usize;
-            flipped_buffer.extend_from_slice(&buffer[start..end]);
+        let mut flipped_pixels = Vec::with_capacity(pixels.len());
+        let row_size = (self.size.width * bytes_per_pixel) as usize;
+
+        for row in pixels.chunks_exact(row_size).rev() {
+            flipped_pixels.extend_from_slice(row);
         }
 
         let image_buffer = image::ImageBuffer::<image::Rgba<u8>, _>::from_raw(
             self.size.width,
             self.size.height,
-            flipped_buffer,
+            flipped_pixels,
         )
         .expect("Failed to create image buffer");
 
@@ -584,7 +590,7 @@ impl State {
 fn main() {
     let matches = Command::new("Shadertoy Harness")
         .version("0.1")
-        .author("Your Name <you@example.com>")
+        .author("Steven Lovegrove")
         .about("Runs a Shadertoy shader in a harness")
         .arg(
             Arg::new("shader")
