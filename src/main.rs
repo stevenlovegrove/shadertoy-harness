@@ -529,12 +529,14 @@ impl State {
         println!("Image saved to {:?}", self.output_file.as_ref().unwrap());
     }
 
-    fn recreate_render_pipeline(&mut self) {
-        let fragment_shader_module =
-            Self::compile_fragment_shader(&self.device, &self.shader_path, &self.defines);
-        self.render_pipeline =
-            self.device
-                .create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+    fn recreate_render_pipeline(&mut self) -> bool {
+        if let Some(fragment_shader_module) =
+            self.compile_fragment_shader(&self.device, &self.shader_path, &self.defines)
+        {
+            self.shader_module = fragment_shader_module;
+
+            self.render_pipeline = self.device.create_render_pipeline(
+                &wgpu::RenderPipelineDescriptor {
                     label: Some("Render Pipeline"),
                     layout: Some(&self.pipeline_layout),
                     vertex: wgpu::VertexState {
@@ -543,7 +545,7 @@ impl State {
                         buffers: &[],
                     },
                     fragment: Some(wgpu::FragmentState {
-                        module: &fragment_shader_module,
+                        module: &self.shader_module,
                         entry_point: "main",
                         targets: &[Some(wgpu::ColorTargetState {
                             format: self.config.as_ref().unwrap().format,
@@ -555,35 +557,63 @@ impl State {
                     depth_stencil: None,
                     multisample: wgpu::MultisampleState::default(),
                     multiview: None,
-                });
+                },
+            );
+            true // Indicate success
+        } else {
+            // Compilation failed; keep using the existing pipeline
+            false // Indicate failure
+        }
     }
 
     fn compile_fragment_shader(
+        &self,
         device: &wgpu::Device,
         shader_path: &PathBuf,
         defines: &HashMap<String, String>,
-    ) -> wgpu::ShaderModule {
+    ) -> Option<wgpu::ShaderModule> {
         let mut compiler = Compiler::new().unwrap();
 
-        // Fragment Shader
+        println!("Compiling shader: {}", shader_path.display());
         let shader_source =
             fs::read_to_string(shader_path).expect("Failed to read shader source file");
         let shader_source = Self::apply_defines(&shader_source, defines);
+        let shader_source = Self::inject_shader_preamble(&shader_source);
 
-        let fragment_spirv = compiler
-            .compile_into_spirv(
-                &shader_source,
-                ShaderKind::Fragment,
-                shader_path.to_str().unwrap(),
-                "main",
-                None,
-            )
-            .expect("Failed to compile fragment shader");
+        // For debugging: Print the transformed shader
+        println!("Transformed shader:");
+        for (i, line) in shader_source.lines().enumerate() {
+            println!("{:4}: {}", i + 1, line);
+        }
 
-        device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        let mut compile_options = shaderc::CompileOptions::new().unwrap();
+        compile_options.set_target_env(
+            shaderc::TargetEnv::Vulkan,
+            shaderc::EnvVersion::Vulkan1_2 as u32,
+        );
+
+        let fragment_spirv = match compiler.compile_into_spirv(
+            &shader_source,
+            ShaderKind::Fragment,
+            shader_path.to_str().unwrap(),
+            "main",
+            Some(&compile_options),
+        ) {
+            Ok(binary) => binary,
+            Err(e) => {
+                eprintln!("Failed to compile fragment shader: {}", e);
+                eprintln!("Transformed shader with line numbers:");
+                for (i, line) in shader_source.lines().enumerate() {
+                    eprintln!("{:4}: {}", i + 1, line);
+                }
+                return None; // Indicate failure
+            }
+        };
+
+        Some(device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("Fragment Shader"),
             source: wgpu::util::make_spirv(fragment_spirv.as_binary_u8()),
-        })
+        }))
     }
 }
 
@@ -741,7 +771,11 @@ fn main() {
                     while let Ok(Ok(event)) = rx.try_recv() {
                         if matches!(event.kind, EventKind::Modify(_)) {
                             println!("Shader file changed, recompiling...");
-                            state.recreate_render_pipeline();
+                            if state.recreate_render_pipeline() {
+                                println!("Shader recompiled successfully.");
+                            } else {
+                                println!("Shader recompilation failed. Using previous shader.");
+                            }
                         }
                     }
                     window.request_redraw();
