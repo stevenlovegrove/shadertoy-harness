@@ -328,7 +328,6 @@ impl State {
         });
 
         // Fragment Shader
-        println!("Compiling shader: {}", shader_path.display());
         let shader_source =
             fs::read_to_string(shader_path).expect("Failed to read shader source file");
         let shader_source = Self::apply_defines(&shader_source, defines);
@@ -614,12 +613,6 @@ impl State {
             fs::read_to_string(shader_path).expect("Failed to read shader source file");
         let shader_source = Self::apply_defines(&shader_source, defines);
         let shader_source = Self::inject_shader_preamble(&shader_source);
-
-        // For debugging: Print the transformed shader
-        println!("Transformed shader:");
-        for (i, line) in shader_source.lines().enumerate() {
-            println!("{:4}: {}", i + 1, line);
-        }
 
         let mut compile_options = shaderc::CompileOptions::new().unwrap();
         compile_options.set_target_env(

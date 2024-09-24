@@ -67,7 +67,8 @@ vec2 transformUV(vec2 uv, float seed) {
 
 // Probability inclusion function
 float patternProbability(float seed) {
-    return fract(sin(seed * 1000.0)) < 0.1 ? 1.0 : 0.0;
+  float weight = sin(seed * 12345.0);
+    return fract(sin(seed * 1000.0)) < 0.1 ? weight : 0.0;
 }
 
 // Checkerboard pattern
@@ -328,16 +329,16 @@ float geomPattern =
         patternProbability(randomSeed * 1010.0) * crossHatchPattern(uvCrossHatch) +
         patternProbability(randomSeed * 1111.0) * voronoiPattern(uvVoronoi) +
         patternProbability(randomSeed * 1212.0) * mandalaPattern(uvMandala) +
-        patternProbability(randomSeed * 1313.0) * mazePattern(uvMaze) +
         patternProbability(randomSeed * 1414.0) * honeycombPattern(uvHoneycomb) +
         patternProbability(randomSeed * 1515.0) * fractalPattern(uvFractal * 10.0) +
         patternProbability(randomSeed * 1616.0) * lavaLampPattern(uvLavaLamp) +
         patternProbability(randomSeed * 1717.0) * interferencePattern(uvInterference) +
         patternProbability(randomSeed * 1818.0) * woodGrainPattern(uvWoodGrain/5.0) +
-        patternProbability(randomSeed * 1919.0) * brickPattern(uvBrick) +
         patternProbability(randomSeed * 2020.0) * perlinWarpPattern(uvPerlinWarp) +
-        // /* patternProbability(randomSeed * 1001.0) * */ abs(sin(uvStripes.y)) * 0.5 +
-        // /* patternProbability(randomSeed * 3003.0) * */ abs(mod(uvHexagons.x + uvHexagons.y, 0.2) * 10.0) +
+        // patternProbability(randomSeed * 1919.0) * brickPattern(uvBrick) +
+        // patternProbability(randomSeed * 1313.0) * mazePattern(uvMaze) +
+        // patternProbability(randomSeed * 1001.0) * abs(sin(uvStripes.y)) * 0.5 +
+        // patternProbability(randomSeed * 3003.0) * abs(mod(uvHexagons.x + uvHexagons.y, 0.2) * 10.0) +
         0;
 
     // Apply fractal noise for texture
