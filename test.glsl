@@ -1,4 +1,3 @@
-//#define TEST 1
 
 // Hash function for randomness
 float hash(vec2 p) {

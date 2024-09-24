@@ -248,6 +248,30 @@ impl State {
         result
     }
 
+    fn inject_shader_preamble(source: &str) -> String {
+        let preamble = r#"#version 450
+
+    layout(set = 0, binding = 0) uniform Uniforms {
+        vec3 iResolution;
+        float iTime;
+        vec4 iMouse;
+    };
+
+    layout(location = 0) out vec4 FragColor;
+
+    "#;
+
+        let postamble = r#"
+
+    void main() {
+        vec2 fragCoord = gl_FragCoord.xy;
+        mainImage(FragColor, fragCoord);
+    }
+
+    "#;
+        format!("{}{}{}", preamble, source, postamble)
+    }
+
     fn compile_shaders(
         device: &wgpu::Device,
         shader_path: &PathBuf,
@@ -280,19 +304,42 @@ impl State {
         });
 
         // Fragment Shader
+        println!("Compiling shader: {}", shader_path.display());
         let shader_source =
             fs::read_to_string(shader_path).expect("Failed to read shader source file");
         let shader_source = Self::apply_defines(&shader_source, defines);
+        let shader_source = Self::inject_shader_preamble(&shader_source);
 
-        let fragment_spirv = compiler
-            .compile_into_spirv(
-                &shader_source,
-                ShaderKind::Fragment,
-                shader_path.to_str().unwrap(),
-                "main",
-                None,
-            )
-            .expect("Failed to compile fragment shader");
+        // For debugging: Print the transformed shader
+        println!("Transformed shader:");
+        for (i, line) in shader_source.lines().enumerate() {
+            println!("{:4}: {}", i + 1, line);
+        }
+
+        let mut compile_options = shaderc::CompileOptions::new().unwrap();
+        compile_options.set_target_env(
+            shaderc::TargetEnv::Vulkan,
+            shaderc::EnvVersion::Vulkan1_2 as u32,
+        );
+
+        let fragment_spirv = match compiler.compile_into_spirv(
+            &shader_source,
+            ShaderKind::Fragment,
+            shader_path.to_str().unwrap(),
+            "main",
+            Some(&compile_options),
+        ) {
+            Ok(binary) => binary,
+            Err(e) => {
+                // Print error message and shader source with line numbers
+                eprintln!("Failed to compile fragment shader: {}", e);
+                eprintln!("Transformed shader with line numbers:");
+                for (i, line) in shader_source.lines().enumerate() {
+                    eprintln!("{:4}: {}", i + 1, line);
+                }
+                panic!("Shader compilation failed");
+            }
+        };
 
         let fragment_shader_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("Fragment Shader"),
@@ -346,8 +393,11 @@ impl State {
             },
         ];
 
-        self.queue
-            .write_buffer(&self.uniform_buffer, 0, bytemuck::cast_slice(&[self.uniforms]));
+        self.queue.write_buffer(
+            &self.uniform_buffer,
+            0,
+            bytemuck::cast_slice(&[self.uniforms]),
+        );
     }
 
     fn render(&mut self) -> Result<(), wgpu::SurfaceError> {
@@ -370,7 +420,9 @@ impl State {
 
         let mut encoder = self
             .device
-            .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("Render Encoder") });
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("Render Encoder"),
+            });
 
         {
             let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -412,7 +464,9 @@ impl State {
 
         let mut encoder = self
             .device
-            .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("Render Encoder") });
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("Render Encoder"),
+            });
 
         encoder.copy_texture_to_buffer(
             wgpu::ImageCopyTexture {
@@ -455,9 +509,12 @@ impl State {
             flipped_buffer.extend_from_slice(&buffer[start..end]);
         }
 
-        let image_buffer =
-            image::ImageBuffer::<image::Rgba<u8>, _>::from_raw(self.size.width, self.size.height, flipped_buffer)
-                .expect("Failed to create image buffer");
+        let image_buffer = image::ImageBuffer::<image::Rgba<u8>, _>::from_raw(
+            self.size.width,
+            self.size.height,
+            flipped_buffer,
+        )
+        .expect("Failed to create image buffer");
 
         image_buffer
             .save(self.output_file.as_ref().unwrap())
@@ -467,35 +524,32 @@ impl State {
     }
 
     fn recreate_render_pipeline(&mut self) {
-        let fragment_shader_module = Self::compile_fragment_shader(
-            &self.device,
-            &self.shader_path,
-            &self.defines,
-        );
-        self.render_pipeline = self.device.create_render_pipeline(
-            &wgpu::RenderPipelineDescriptor {
-                label: Some("Render Pipeline"),
-                layout: Some(&self.pipeline_layout),
-                vertex: wgpu::VertexState {
-                    module: &self.vertex_shader_module,
-                    entry_point: "main",
-                    buffers: &[],
-                },
-                fragment: Some(wgpu::FragmentState {
-                    module: &fragment_shader_module,
-                    entry_point: "main",
-                    targets: &[Some(wgpu::ColorTargetState {
-                        format: self.config.as_ref().unwrap().format,
-                        blend: Some(wgpu::BlendState::REPLACE),
-                        write_mask: wgpu::ColorWrites::ALL,
-                    })],
-                }),
-                primitive: wgpu::PrimitiveState::default(),
-                depth_stencil: None,
-                multisample: wgpu::MultisampleState::default(),
-                multiview: None,
-            },
-        );
+        let fragment_shader_module =
+            Self::compile_fragment_shader(&self.device, &self.shader_path, &self.defines);
+        self.render_pipeline =
+            self.device
+                .create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                    label: Some("Render Pipeline"),
+                    layout: Some(&self.pipeline_layout),
+                    vertex: wgpu::VertexState {
+                        module: &self.vertex_shader_module,
+                        entry_point: "main",
+                        buffers: &[],
+                    },
+                    fragment: Some(wgpu::FragmentState {
+                        module: &fragment_shader_module,
+                        entry_point: "main",
+                        targets: &[Some(wgpu::ColorTargetState {
+                            format: self.config.as_ref().unwrap().format,
+                            blend: Some(wgpu::BlendState::REPLACE),
+                            write_mask: wgpu::ColorWrites::ALL,
+                        })],
+                    }),
+                    primitive: wgpu::PrimitiveState::default(),
+                    depth_stencil: None,
+                    multisample: wgpu::MultisampleState::default(),
+                    multiview: None,
+                });
     }
 
     fn compile_fragment_shader(
@@ -638,11 +692,9 @@ fn main() {
 
         // Watch shader file
         let (tx, rx) = channel();
-        let mut watcher = RecommendedWatcher::new(
-            move |res| tx.send(res).unwrap(),
-            notify::Config::default(),
-        )
-        .unwrap();
+        let mut watcher =
+            RecommendedWatcher::new(move |res| tx.send(res).unwrap(), notify::Config::default())
+                .unwrap();
         watcher
             .watch(&shader_path, RecursiveMode::NonRecursive)
             .unwrap();
